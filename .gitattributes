@@ -1,0 +1,10 @@
+# Normalise text files to LF in the repo.
+* text=auto eol=lf
+
+# These MUST stay LF. A CRLF shebang breaks the script with
+# "bad interpreter: /usr/bin/env bash^M", and CRLF confuses psql.
+*.sh  text eol=lf
+*.sql text eol=lf
+
+# CSVs are data - never touch their line endings.
+*.csv -text

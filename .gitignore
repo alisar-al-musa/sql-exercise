@@ -1,0 +1,19 @@
+# Secrets
+.env
+
+# Raw dataset (~123 MB) - too large for git.
+# See README for how to fetch it.
+data/raw/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
