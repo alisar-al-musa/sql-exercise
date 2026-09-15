@@ -4,8 +4,7 @@ Findings from profiling `staging.*` after ingestion, and the cleaning decisions
 they drive. Every number here came from a query against the loaded data, not
 from the dataset's documentation.
 
-Re-run with `bash scripts/profile.sh`. The per-column profile in section 7 is a
-separate, slower script (~3 min): `psql < scripts/columns.sql`.
+Re-run with `bash scripts/profile.sh`.
 
 ## 1. Key uniqueness
 
@@ -39,12 +38,35 @@ Two separate problems, and they are not the same problem:
 No two rows are identical across all seven columns (99,224 distinct whole rows),
 so blind `DISTINCT` de-duplication removes nothing.
 
-**Decision:** keep every row. Use the composite `(review_id, order_id)` as the
-primary key. Dropping rows would discard real review text needed by the RAG
-track later, and picking a "winner" per order would be an arbitrary choice
-disguised as cleaning. The consequence is that `orders → order_reviews` is
-one-to-many, so any average-score query must aggregate rather than assume one
-review per order.
+The two cases get opposite treatment, because they are opposite problems.
+
+**Decision — the 547 duplicated orders: de-duplicate to one review per order.**
+An order logically has one review; these are data errors, not a real
+one-to-many relationship. `order_id` becomes the primary key.
+
+The tie-break matters, because the duplicates often disagree:
+
+| | Orders | Avg score gap | Worst |
+| --- | ---: | ---: | ---: |
+| Identical score | 345 | 0 | 0 |
+| **Conflicting scores** | **202** | **2.04** | **4** |
+
+The pattern in the conflicts is a customer rating optimistically, then returning
+to rate again once the order actually arrived — or did not:
+
+```
+09a38776c4... | 5 | created 2018-02-17 | (no comment)
+09a38776c4... | 1 | created 2018-03-07 | "nao recebi o produto"   -- "I did not receive the product"
+```
+
+So we keep the **latest** review, which is the customer's settled verdict.
+Ordering by `review_answer_timestamp` resolves all 547; `review_creation_date`
+leaves 157 tied. 547 rows dropped, **98,673 remain**.
+
+**Decision — the 789 duplicated review_ids: keep every row.** These are one
+person's review attached to several of their orders, which is legitimate.
+The consequence is that `review_id` cannot be a primary key or carry a `UNIQUE`
+constraint; it is a plain attribute recording which review text a row came from.
 
 ## 2. Type casting
 
@@ -87,11 +109,31 @@ silently corrupt every delivery-time calculation.
 Eight orders are marked `delivered` with no `order_delivered_customer_date`.
 Seven have a carrier date, so they did physically ship; one has neither.
 
-**Decision:** keep them as-is, do not patch the status. They are genuine source
-inconsistencies, and the LEFT JOIN + NULL handling they force is the point of
-Exercise 5.1. Any late-delivery query must filter on
-`order_delivered_customer_date IS NOT NULL` rather than trusting
-`order_status = 'delivered'` — these 8 rows are what breaks the lazy version.
+Measured from the 96,469 delivered orders that have both dates, carrier handover
+to customer takes a **median of 7.1 days** (mean 9.33, and 23 orders have a
+negative gap — more source noise).
+
+**Decision — the 7 with a carrier date: impute
+`order_delivered_carrier_date + 7.1 days`.** The carrier date alone is a lower
+bound, not an estimate; using it raw would assert a zero-day delivery and pull
+every one of these to the earliest possible date. Adding the median gap keeps
+the ordering constraint (delivery cannot precede handover) without that bias.
+
+**Decision — the 1 with neither date: delete the order,** along with its 1
+`order_items`, 1 payment and 1 review row. Nothing in the source supports an
+estimate for it. The child rows have to go too, or Phase 2's foreign keys fail.
+
+Dropping all 8 was considered and rejected: it would orphan 24 child rows and
+remove **R$1,249.18** of revenue, destroying real order, payment and review data
+to fix a missing date.
+
+Imputed values are **not flagged with a column** — this note is the record of
+which rows were changed. All 7 fall on time against their estimated dates either
+way, so the imputation does not alter any late-delivery result.
+
+The remaining 2,957 nulls stay `NULL` and the columns stay nullable, so a
+late-delivery query must still filter on `order_delivered_customer_date IS NOT
+NULL` rather than trusting `order_status = 'delivered'`.
 
 ## 4. Referential integrity
 
@@ -147,90 +189,19 @@ reaches a value — verified by hex-dumping the first loaded category
 (`62656c65...`, no `EFBBBF` prefix). Accented text round-trips correctly
 (`são paulo`). Empty CSV fields became real `NULL`, not `''` — 2,965 vs 0.
 
-## 7. Column profile — 52 columns
+## 7. Two structural notes
 
-Types were decided by testing what the values parse as, not by column name.
+**`orders` → `customers` is 1:1, not many-to-1.** `orders.customer_id` has
+99,441 distinct values in 99,441 rows — unique. Olist mints a fresh
+`customer_id` for every order, so `customers` is really an order-address
+snapshot rather than a customer table. The person is `customer_unique_id`:
+96,096 distinct, **1.035 orders each**. So `count(DISTINCT customer_id)` counts
+orders, not people, and any "customers" figure must say which it means.
 
-| Type | Role | Columns |
-| --- | --- | ---: |
-| numeric | measure | 14 |
-| text | high-cardinality text | 9 |
-| timestamp | date | 8 |
-| text | key candidate (unique) | 7 |
-| text | categorical | 5 |
-| numeric | categorical | 5 |
-| text | identifier / free text | 4 |
-
-So: **19 numeric, 8 timestamp, 25 text** — of which 10 are genuinely categorical
-(≤30 distinct values) and 7 are unique key candidates.
-
-### Single-column primary key candidates
-
-| Table | Column | Rows |
-| --- | --- | ---: |
-| `customers` | `customer_id` | 99,441 |
-| `orders` | `order_id` | 99,441 |
-| `orders` | `customer_id` | 99,441 |
-| `products` | `product_id` | 32,951 |
-| `sellers` | `seller_id` | 3,095 |
-| `product_category_name_translation` | `product_category_name` | 71 |
-
-`order_items` and `order_payments` need composite keys; `order_reviews` needs a
-de-duplication decision first (section 1); `geolocation` has no unique column at
-all — 1,000,163 rows collapse to 720,154 distinct `(zip, lat, lng)` triples. It
-is a coordinate lookup, not an entity table, so it gets a surrogate key or none.
-
-### `orders` → `customers` is 1:1, not many-to-1
-
-`orders.customer_id` has 99,441 distinct values in 99,441 rows — **unique**. Olist
-mints a fresh `customer_id` for every order, so the `customers` table is really
-an order-address snapshot. The person is `customer_unique_id`: 96,096 distinct,
-**1.035 orders per person**.
-
-Consequence: `count(DISTINCT customer_id)` counts orders, not people. Any
-"customers" figure must say which it means.
-
-### Categorical columns
-
-| Table | Column | Distinct |
-| --- | --- | ---: |
-| `order_payments` | `payment_type` | 5 |
-| `order_reviews` | `review_score` | 5 |
-| `orders` | `order_status` | 8 |
-| `products` | `product_photos_qty` | 19 |
-| `order_items` | `order_item_id` | 21 |
-| `sellers` | `seller_state` | 23 |
-| `order_payments` | `payment_installments` | 24 |
-| `customers` | `customer_state` | 27 |
-| `geolocation` | `geolocation_state` | 27 |
-| `order_payments` | `payment_sequential` | 29 |
-
-`customer_state` and `geolocation_state` both have 27 — Brazil's 26 states plus
-the Federal District, so the values are complete. `seller_state` has 23; four
-states have no sellers.
-
-`order_item_id` is a line number within an order (1–21), not an identifier.
-
-### Which "timestamps" are really dates
-
-| Column | Rows with a time component |
-| --- | ---: |
-| `order_estimated_delivery_date` | **0** |
-| `review_creation_date` | 85 of 99,224 |
-| `order_purchase_timestamp` | 99,440 of 99,441 |
-| `review_answer_timestamp` | 99,223 of 99,224 |
-| `shipping_limit_date` | 112,650 of 112,650 |
-
-**Decision:** `order_estimated_delivery_date` becomes `DATE` — every value is
-midnight, so `TIMESTAMP` would imply a precision the source does not have. This
-matters for Exercise 5.1: comparing a real delivery timestamp against a
-midnight estimate counts anything after 00:00 on the estimated day as late.
-Everything else stays `TIMESTAMP`, including `review_creation_date` — 85 rows
-do carry a time, so it is not safely a `DATE`.
-
-### Category coverage
-
-`products` holds 73 distinct categories, the translation file 71, and **none of
-the 71 is unused**. So the 73 are exactly the 71 translated plus the 2 orphans
-from section 4 — consistent with the 13 orphan products found there.
+**`order_estimated_delivery_date` is a date, not a timestamp.** Every one of its
+99,441 values is exactly midnight, so it becomes `DATE`; `TIMESTAMP` would imply
+precision the source does not have. This matters for Exercise 5.1: a real
+delivery timestamp compared against a midnight estimate counts anything after
+00:00 on the estimated day as late. `review_creation_date` looks similar but 85
+of its rows do carry a time, so it stays `TIMESTAMP`.
 
