@@ -19,8 +19,8 @@ cp .env.example .env
 # 3. Start PostgreSQL 18 + pgvector
 docker compose up -d
 
-# 4. Apply the schema
-bash scripts/migrate.sh
+# 4. Migrate and seed -- raw CSVs to a fully seeded database
+bash scripts/seed.sh
 ```
 
 Connect with:
@@ -58,7 +58,7 @@ Expected contents once in place:
 | `seed/` | Re-runnable ingestion scripts. |
 | `queries/` | One `.sql` per exercise, named by exercise number. |
 | `docs/` | ERD and supporting notes. |
-| `scripts/` | Operational scripts (migration runner). |
+| `scripts/` | Operational scripts (migration runner, seeder). |
 | `data/raw/` | Source CSVs (gitignored). |
 
 ## Migrations
@@ -69,6 +69,31 @@ applied migrations are skipped. Each migration runs in one transaction, so a
 failure rolls back fully and is not recorded.
 
 To add one, create `migrations/00N_description.sql` and re-run the script.
+
+## Seeding
+
+`scripts/seed.sh` is the single command from raw CSVs to a seeded database. It
+applies pending migrations, then runs every file in `seed/` in filename order.
+
+It is idempotent -- each load truncates its tables before copying, so re-running
+never duplicates rows. `seed/99_verify_staging.sql` then compares every table
+against the source row counts and fails loudly if any differ.
+
+Loading uses server-side `COPY` reading from the read-only `/data/raw` mount,
+rather than `\copy`, which would stream all 1,000,163 geolocation rows through
+the client. A full load takes about 10 seconds.
+
+### Staging
+
+`staging.*` is a landing zone that mirrors the CSVs exactly: every column
+`TEXT`, header names copied verbatim (including the dataset's own misspelling
+`product_name_lenght`), and no keys or constraints. A bad value can therefore
+never abort a load, and duplicates and nulls stay visible as findings rather
+than becoming errors. Typing and cleaning happen in a later, separate step.
+
+`product_category_name_translation.csv` begins with a UTF-8 BOM. `HEADER true`
+discards the first line without parsing it, so the BOM is never read. Do not
+switch to `HEADER MATCH` -- it validates header names and would fail on it.
 
 ## Local notes
 
@@ -93,5 +118,5 @@ Using the old path makes the container refuse to start.
 ```bash
 docker compose down -v   # deletes the volume and all data
 docker compose up -d
-bash scripts/migrate.sh
+bash scripts/seed.sh
 ```
