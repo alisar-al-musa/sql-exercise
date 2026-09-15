@@ -4,7 +4,8 @@ Findings from profiling `staging.*` after ingestion, and the cleaning decisions
 they drive. Every number here came from a query against the loaded data, not
 from the dataset's documentation.
 
-Re-run with `bash scripts/profile.sh`.
+Re-run with `bash scripts/profile.sh`. The per-column profile in section 7 is a
+separate, slower script (~3 min): `psql < scripts/columns.sql`.
 
 ## 1. Key uniqueness
 
@@ -145,3 +146,91 @@ the query is right, not broken.
 reaches a value — verified by hex-dumping the first loaded category
 (`62656c65...`, no `EFBBBF` prefix). Accented text round-trips correctly
 (`são paulo`). Empty CSV fields became real `NULL`, not `''` — 2,965 vs 0.
+
+## 7. Column profile — 52 columns
+
+Types were decided by testing what the values parse as, not by column name.
+
+| Type | Role | Columns |
+| --- | --- | ---: |
+| numeric | measure | 14 |
+| text | high-cardinality text | 9 |
+| timestamp | date | 8 |
+| text | key candidate (unique) | 7 |
+| text | categorical | 5 |
+| numeric | categorical | 5 |
+| text | identifier / free text | 4 |
+
+So: **19 numeric, 8 timestamp, 25 text** — of which 10 are genuinely categorical
+(≤30 distinct values) and 7 are unique key candidates.
+
+### Single-column primary key candidates
+
+| Table | Column | Rows |
+| --- | --- | ---: |
+| `customers` | `customer_id` | 99,441 |
+| `orders` | `order_id` | 99,441 |
+| `orders` | `customer_id` | 99,441 |
+| `products` | `product_id` | 32,951 |
+| `sellers` | `seller_id` | 3,095 |
+| `product_category_name_translation` | `product_category_name` | 71 |
+
+`order_items` and `order_payments` need composite keys; `order_reviews` needs a
+de-duplication decision first (section 1); `geolocation` has no unique column at
+all — 1,000,163 rows collapse to 720,154 distinct `(zip, lat, lng)` triples. It
+is a coordinate lookup, not an entity table, so it gets a surrogate key or none.
+
+### `orders` → `customers` is 1:1, not many-to-1
+
+`orders.customer_id` has 99,441 distinct values in 99,441 rows — **unique**. Olist
+mints a fresh `customer_id` for every order, so the `customers` table is really
+an order-address snapshot. The person is `customer_unique_id`: 96,096 distinct,
+**1.035 orders per person**.
+
+Consequence: `count(DISTINCT customer_id)` counts orders, not people. Any
+"customers" figure must say which it means.
+
+### Categorical columns
+
+| Table | Column | Distinct |
+| --- | --- | ---: |
+| `order_payments` | `payment_type` | 5 |
+| `order_reviews` | `review_score` | 5 |
+| `orders` | `order_status` | 8 |
+| `products` | `product_photos_qty` | 19 |
+| `order_items` | `order_item_id` | 21 |
+| `sellers` | `seller_state` | 23 |
+| `order_payments` | `payment_installments` | 24 |
+| `customers` | `customer_state` | 27 |
+| `geolocation` | `geolocation_state` | 27 |
+| `order_payments` | `payment_sequential` | 29 |
+
+`customer_state` and `geolocation_state` both have 27 — Brazil's 26 states plus
+the Federal District, so the values are complete. `seller_state` has 23; four
+states have no sellers.
+
+`order_item_id` is a line number within an order (1–21), not an identifier.
+
+### Which "timestamps" are really dates
+
+| Column | Rows with a time component |
+| --- | ---: |
+| `order_estimated_delivery_date` | **0** |
+| `review_creation_date` | 85 of 99,224 |
+| `order_purchase_timestamp` | 99,440 of 99,441 |
+| `review_answer_timestamp` | 99,223 of 99,224 |
+| `shipping_limit_date` | 112,650 of 112,650 |
+
+**Decision:** `order_estimated_delivery_date` becomes `DATE` — every value is
+midnight, so `TIMESTAMP` would imply a precision the source does not have. This
+matters for Exercise 5.1: comparing a real delivery timestamp against a
+midnight estimate counts anything after 00:00 on the estimated day as late.
+Everything else stays `TIMESTAMP`, including `review_creation_date` — 85 rows
+do carry a time, so it is not safely a `DATE`.
+
+### Category coverage
+
+`products` holds 73 distinct categories, the translation file 71, and **none of
+the 71 is unused**. So the 73 are exactly the 71 translated plus the 2 orphans
+from section 4 — consistent with the 13 orphan products found there.
+
