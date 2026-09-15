@@ -76,7 +76,7 @@ To add one, create `migrations/00N_description.sql` and re-run the script.
 applies pending migrations, then runs every file in `seed/` in filename order.
 
 It is idempotent -- each load truncates its tables before copying, so re-running
-never duplicates rows. `seed/99_verify_staging.sql` then compares every table
+never duplicates rows. `seed/02_verify_staging.sql` then compares every table
 against the source row counts and fails loudly if any differ.
 
 Loading uses server-side `COPY` reading from the read-only `/data/raw` mount,
@@ -94,6 +94,46 @@ than becoming errors. Typing and cleaning happen in a later, separate step.
 `product_category_name_translation.csv` begins with a UTF-8 BOM. `HEADER true`
 discards the first line without parsing it, so the BOM is never read. Do not
 switch to `HEADER MATCH` -- it validates header names and would fail on it.
+
+### Cleaning
+
+`core.*` is the working schema: real types, corrected names, cleaning rules
+applied. The pipeline runs in four steps, each verified before the next
+consumes it.
+
+| Step | File | Does |
+| --- | --- | --- |
+| 1 | `seed/01_load_staging.sql` | CSVs into `staging.*`, all TEXT |
+| 2 | `seed/02_verify_staging.sql` | row counts match the source files |
+| 3 | `seed/03_clean.sql` | `staging.*` cast and cleaned into `core.*` |
+| 4 | `seed/04_verify_core.sql` | counts, key uniqueness, cleaning rules, FK integrity |
+
+Four cleaning rules are applied, each decided from measured evidence rather
+than assumption. The full reasoning, including the options rejected, is in
+[docs/data-profile.md](docs/data-profile.md).
+
+1. **One order dropped.** It is marked `delivered` with neither a delivery nor
+   a carrier date, so nothing supports an estimate. Its `order_items`, payment
+   and review rows go with it, or they would point at a missing order.
+2. **Seven delivery dates imputed** as `carrier_date + 7.1 days`, the measured
+   median handover-to-customer gap. The carrier date alone is a lower bound and
+   would assert a zero-day delivery.
+3. **`order_reviews` de-duplicated to one review per order**, keeping the
+   latest `review_answer_timestamp`. 202 of the 547 duplicated orders disagree
+   on score, so the tie-break is not cosmetic.
+4. **Category translated with a fallback.** A `LEFT JOIN` plus `COALESCE`, so
+   the 13 products in categories missing from the translation file keep their
+   Portuguese name instead of being dropped.
+
+The remaining 2,957 missing delivery dates stay `NULL` -- those orders were
+never delivered, so no date exists. Queries about delivery must filter on
+`order_delivered_customer_date IS NOT NULL` rather than trusting
+`order_status = 'delivered'`.
+
+Primary keys, foreign keys and indexes are **not** in this phase; the brief
+puts them in Phase 2. `seed/04_verify_core.sql` proves every intended key is
+already unique and every planned foreign key would hold, so Phase 2 can declare
+them knowing they will not fail.
 
 ## Local notes
 
