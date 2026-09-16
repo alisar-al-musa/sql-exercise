@@ -174,6 +174,27 @@ No vector index is built — an `ivfflat` index clusters the rows present when i
 is created, so building one on an empty table produces an index that degrades
 to a sequential scan.
 
+## Running a query file
+
+```bash
+bash scripts/query.sh queries/5_1.sql        # Git Bash
+```
+
+```powershell
+.\scripts\query.ps1 queries\5_1.sql          # PowerShell
+```
+
+Both pipe the file over stdin, because `queries/` is not mounted into the
+container. Use the PowerShell version from a normal Windows terminal: there,
+`bash` resolves to WSL's bash, which cannot see Docker unless WSL integration
+is enabled in Docker Desktop.
+
+For an interactive session:
+
+```bash
+docker compose exec db psql -U postgres -d olist
+```
+
 ## Local notes
 
 **Port 5433, not 5432.** Another project on this machine already uses 5432, so
