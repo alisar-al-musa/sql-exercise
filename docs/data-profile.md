@@ -187,10 +187,15 @@ The 775 item-less orders are mostly `unavailable` and `canceled`. An INNER JOIN
 from orders to order_items silently drops them — fine for revenue, wrong for
 order counts.
 
-**Products never ordered is genuinely 0.** All 32,951 products appear in
-`order_items`. Exercise 5.1 asks for products never ordered, and the correct
-answer for this dataset is an **empty result set**. An empty result there means
-the query is right, not broken.
+**Products never ordered is 0 in `staging`, but 1 in `core`** — and cleaning is
+what created it. Product `30b5b5635a79548a48d04162d971848f` appears exactly
+once in the whole dataset, on order `2d858f451373b04fb5c984a1cc2defaf`: the
+order dropped by cleaning rule 1. Removing that order removed its only
+`order_items` row, orphaning the product.
+
+So the answer depends on which schema is queried, and `core` is the one the
+exercises run against. Worth remembering that a cleaning rule can create a
+finding as well as remove one.
 
 ## 6. Encoding
 
