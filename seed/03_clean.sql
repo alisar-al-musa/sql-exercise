@@ -36,15 +36,27 @@ WHERE order_status = 'delivered'
   AND order_delivered_customer_date IS NULL
   AND order_delivered_carrier_date  IS NULL;
 
--- Reference data first. Nothing here needs cleaning beyond casting.
+-- Reference data first. Apart from the customer below, nothing here needs
+-- cleaning beyond casting.
 
+-- Rule 1 continued. The dropped order's customer row goes with it. Olist mints
+-- a fresh customer_id per order, so that row describes an order that no longer
+-- exists; keeping it would leave core.customers one row larger than core.orders
+-- and make "how many customers" disagree with "how many orders" in a 1:1 model.
+-- Nothing is lost: the person behind it is identified by customer_unique_id,
+-- and staging.customers keeps the original row untouched.
 INSERT INTO core.customers
-SELECT customer_id,
-       customer_unique_id,
-       customer_zip_code_prefix::integer,
-       customer_city,
-       customer_state
-FROM staging.customers;
+SELECT c.customer_id,
+       c.customer_unique_id,
+       c.customer_zip_code_prefix::integer,
+       c.customer_city,
+       c.customer_state
+FROM staging.customers c
+WHERE NOT EXISTS (
+  SELECT 1
+  FROM staging.orders o
+  JOIN dropped_orders d ON d.order_id = o.order_id
+  WHERE o.customer_id = c.customer_id);
 
 -- DISTINCT removes 261,831 exactly-duplicated coordinate rows (1,000,163 ->
 -- 738,332). Only whole-row duplicates go; two rows sharing a zip but differing

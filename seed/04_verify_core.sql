@@ -9,7 +9,8 @@
 DO $$
 DECLARE
   expected CONSTANT TEXT[][] := ARRAY[
-    ['customers',                    '99441'],
+    -- 99,441 in the CSV minus the dropped order's customer.
+    ['customers',                    '99440'],
     ['geolocation',                  '738332'],
     ['sellers',                      '3095'],
     ['product_category_translation', '71'],
@@ -126,6 +127,13 @@ BEGIN
      AND NOT EXISTS (SELECT 1 FROM core.product_category_translation t
                      WHERE t.product_category_name = p.product_category_name);
   IF n <> 13 THEN errors := errors || format(E'\n  expected 13 products falling back to the Portuguese name, found %s', n); END IF;
+
+  -- Rule 1 again: no customer row survives without its order. This is the
+  -- reverse of a foreign key -- the FK stops an order pointing at a missing
+  -- customer, nothing stops a customer outliving its only order.
+  SELECT count(*) INTO n FROM core.customers c
+   WHERE NOT EXISTS (SELECT 1 FROM core.orders o WHERE o.customer_id = c.customer_id);
+  IF n <> 0 THEN errors := errors || format(E'\n  %s customers have no order', n); END IF;
 
   -- The typo is gone.
   SELECT count(*) INTO n FROM information_schema.columns

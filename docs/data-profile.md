@@ -148,9 +148,12 @@ Checked with anti-joins before declaring any constraint, because a failing
 | `order_items.seller_id → sellers` | 0 |
 | `order_payments.order_id → orders` | 0 |
 | `order_reviews.order_id → orders` | 0 |
-| `products.product_category_name → translation` | **13** |
+| `products.product_category_name → translation` | **13 products** |
+| `customers.customer_zip_code_prefix → geolocation` | **157 zips** |
+| `sellers.seller_zip_code_prefix → geolocation` | **7 zips** |
 
-All Phase 2 foreign keys will hold except the category translation.
+Six of the nine hold and were declared as real foreign keys in Phase 2. The
+bottom three could not be.
 
 **The 13 orphans:** `portateis_cozinha_e_preparadores_de_alimentos` (10 products)
 and `pc_gamer` (3). Both are missing from the 71-row translation file.
@@ -159,6 +162,14 @@ and `pc_gamer` (3). Both are missing from the 71-row translation file.
 not as a foreign-key parent. Untranslated categories fall back to the Portuguese
 name via `COALESCE`. Adding the two missing rows ourselves would mean inventing
 source data; enforcing the FK would mean deleting 13 real products.
+
+**The geolocation orphans:** `geolocation` does not cover every zip prefix in
+use — 157 customer prefixes and 7 seller prefixes are absent from it.
+
+**Decision:** `geolocation` is a **lookup, always LEFT JOINed**, never a
+foreign-key parent. It also gets no primary key: no column or combination is
+unique even after de-duplication, and nothing references an individual row.
+Any query mapping an order to coordinates must expect misses.
 
 ## 5. Coverage gaps
 
@@ -205,3 +216,65 @@ delivery timestamp compared against a midnight estimate counts anything after
 00:00 on the estimated day as late. `review_creation_date` looks similar but 85
 of its rows do carry a time, so it stays `TIMESTAMP`.
 
+
+## 8. Constraint candidates, tested before declaring
+
+Every `CHECK` proposed for Phase 2 was counted against the loaded rows first.
+Roughly a third of the obvious-looking ones turned out to be false.
+
+**Declared** — zero violations, so they hold:
+
+| Constraint | Observed |
+| --- | --- |
+| `review_score BETWEEN 1 AND 5` | range is exactly 1–5 |
+| `price >= 0`, `freight_value >= 0`, `payment_value >= 0` | minimums 0.85, 0.00, 0.00 |
+| `order_item_id >= 1`, `payment_sequential >= 1` | both start at 1 |
+| `payment_installments >= 0` | minimum 0 |
+| `order_approved_at >= order_purchase_timestamp` | 0 violations |
+| `review_answer_timestamp >= review_creation_date` | 0 violations |
+| latitude ±90, longitude ±180 | 0 violations |
+| `order_status` in 8 values, `payment_type` in 5 | closed sets in the source |
+
+**Rejected** — the data violates them, so declaring any would fail the
+migration:
+
+| Candidate | Violating rows |
+| --- | ---: |
+| `order_delivered_carrier_date >= order_purchase_timestamp` | **166** |
+| `order_delivered_customer_date >= order_delivered_carrier_date` | **23** |
+| `product_weight_g > 0` | **4** |
+| coordinates inside a Brazilian bounding box | **33** |
+
+Note the second one: cleaning rule 2 imputes delivery as `carrier + 7.1 days`
+precisely so delivery follows handover, yet 23 *other* rows already breach that
+ordering in the source. Fixing the eight contradictions did not make the rule
+universally true.
+
+**Decision:** declare only what holds. The alternative — deleting 193 real rows
+so an invented constraint can be satisfied — would destroy more information
+than it protects. `>= 0` was chosen over `> 0` for money for the same reason:
+free-shipping lines legitimately cost 0.00, and requiring a positive amount
+would be a business rule we made up rather than something the data states.
+
+## 9. Addresses belong to the order, not the person
+
+Tested while deciding whether `customers` could collapse to one row per person:
+
+| | Count |
+| --- | ---: |
+| Distinct people (`customer_unique_id`) | 96,096 |
+| …using more than one zip code | **250** |
+| …more than one city | 122 |
+| …more than one state | **39** |
+| Most orders by one person | 17 |
+
+So the repetition in `customers` is **not redundancy** — it is per-order data.
+Collapsing to `customer_unique_id` would silently discard 250 real shipping
+addresses.
+
+**Decision:** keep `customers` keyed on `customer_id`, one row per order, with
+the address alongside it. `customer_unique_id` stays an indexed attribute for
+counting real people. Restructuring so that `customers` held only
+`customer_unique_id` was considered and rejected: it would leave a table with a
+single column, and move the address to `orders` for a gain that does not
+justify diverging from the source shape.

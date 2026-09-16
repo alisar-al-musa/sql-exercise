@@ -130,10 +130,49 @@ never delivered, so no date exists. Queries about delivery must filter on
 `order_delivered_customer_date IS NOT NULL` rather than trusting
 `order_status = 'delivered'`.
 
-Primary keys, foreign keys and indexes are **not** in this phase; the brief
-puts them in Phase 2. `seed/04_verify_core.sql` proves every intended key is
-already unique and every planned foreign key would hold, so Phase 2 can declare
-them knowing they will not fail.
+Primary keys, foreign keys and indexes are **not** applied here; they arrive in
+migration 004. `seed/04_verify_core.sql` proves every intended key is already
+unique and every planned foreign key would hold, so 004 declares them knowing
+they cannot fail.
+
+## Schema
+
+`migrations/004_keys_and_indexes.sql` turns the working schema into a real
+relational model, and `005_review_embeddings.sql` adds the vector column. The
+diagram is in [docs/erd.md](docs/erd.md).
+
+| | Count | Notes |
+| --- | ---: | --- |
+| Primary keys | 8 | 3 composite; `geolocation` deliberately has none |
+| Unique constraints | 1 | `orders.customer_id` — this is what makes it 1:1 |
+| Foreign keys | 6 | `ON DELETE NO ACTION`, not `CASCADE` |
+| Check constraints | 10 | each counted against the data before declaring |
+| Indexes | 6 | beyond the 9 that keys create automatically |
+
+Three points a reviewer usually asks about:
+
+**`orders` → `customers` is 1:1.** Olist issues a fresh `customer_id` for every
+order, so `customers` is an order-address snapshot rather than a table of
+people. The `UNIQUE` constraint states this rather than letting the diagram
+imply a many-to-1 that does not exist. The person is `customer_unique_id`
+(96,096 distinct, indexed) — so `count(DISTINCT customer_id)` counts **orders**.
+
+**Three expected foreign keys are absent**, because the data refuses them:
+`products → translation` (13 orphan products), and both zip-code columns
+→ `geolocation` (157 and 7 orphan prefixes). All three are `LEFT JOIN` lookups.
+
+**Four obvious-looking check constraints were tested and rejected** — delivery
+dates preceding handover (23 rows), carrier dates preceding purchase (166),
+zero product weights (4), coordinates outside Brazil (33). Declaring any would
+mean deleting 193 real rows to satisfy a rule we invented. Section 8 of
+[docs/data-profile.md](docs/data-profile.md) has the full list, declared and
+rejected.
+
+The `embedding vector(1024)` column on `order_reviews` is nullable and left
+empty; populating it needs an embedding model, which is outside this pipeline.
+No vector index is built — an `ivfflat` index clusters the rows present when it
+is created, so building one on an empty table produces an index that degrades
+to a sequential scan.
 
 ## Local notes
 
