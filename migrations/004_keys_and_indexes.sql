@@ -207,7 +207,7 @@ CREATE INDEX IF NOT EXISTS customers_unique_id_idx
 CREATE INDEX IF NOT EXISTS geolocation_zip_code_prefix_idx
   ON core.geolocation (geolocation_zip_code_prefix);
 
--- Indexes deliberately NOT created, because they would not be used:
+-- Indexes that are deliberately NOT created, because they would not be used:
 --
 --   orders(order_delivered_customer_date)
 --       The late-delivery question compares it to another column in the SAME

@@ -13,6 +13,7 @@
 
 BEGIN;
 
+-- this truncate achieves idempotency, since seed reruns without checking
 TRUNCATE
   core.customers,
   core.geolocation,
