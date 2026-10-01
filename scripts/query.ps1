@@ -1,5 +1,4 @@
-# Run a .sql file against the database and print the result. PowerShell version
-# of scripts/query.sh, for running from a normal Windows terminal.
+# Run a .sql file against the database and print the result.
 #
 #   .\scripts\query.ps1 queries\ex1.sql
 #   .\scripts\query.ps1 queries\ex1.sql | Tee-Object results\ex1.txt
